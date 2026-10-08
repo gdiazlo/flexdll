@@ -30,6 +30,7 @@ let cc = function
   | `CYGWIN64 -> Version.cygwin64
   | `MINGW -> Version.mingw
   | `MINGW64 -> Version.mingw64
+  | `MINGWARM64 -> Version.mingwarm64
   | `GNAT | `GNAT64 -> Version.gnat
   | `LIGHTLD -> failwith "No C compiler configured for this toolchain."
 
@@ -193,7 +194,7 @@ let build_diversion lst =
   in
   let lst =
     match !toolchain with
-    | `MINGW | `MINGW64 | `GNAT | `GNAT64 | `CYGWIN64 -> lst
+    | `MINGW | `MINGW64 | `MINGWARM64 | `GNAT | `GNAT64 | `CYGWIN64 -> lst
     | `MSVC | `MSVC64 | `LIGHTLD ->
       (* UTF-16 response files required *)
       try
@@ -372,13 +373,13 @@ let int_to_buf b i =
   assert(i >= 0);
   match !machine with
   | `x86 -> int32_to_buf b i
-  | `x64 -> int32_to_buf b i; int32_to_buf b 0
+  | `x64 | `arm64 -> int32_to_buf b i; int32_to_buf b 0
 
 let exportable s =
   match !machine with
   | `x86 ->
       s <> "" && (s.[0] = '_' || s.[0] = '?')
-  | `x64 ->
+  | `x64 | `arm64 ->
       if String.length s > 2 && s.[0] = '?' && s.[1] = '?' then false
       else true
 
@@ -392,7 +393,7 @@ let drop_underscore obj s =
         | '?' -> s
         | _ -> failwith (Printf.sprintf "In %s, symbol %s doesn't start with _ or ?" obj.obj_name s)
       end
-  | `x64 ->
+  | `x64 | `arm64 ->
       s
 
 let has_prefix pr s =
@@ -423,7 +424,49 @@ module StrSet = Set.Make(String)
    by their name). It also lists segments that are normally write-protected
    and that must be de-protected to enable the patching process. *)
 
+(* ARM64 B/BL cannot reach arbitrary DLLs under ASLR. Redirect deferred calls
+   through local, stackless x16 veneers; their full-width literal pointers use
+   the existing runtime relocation format. Keep function-address imports intact. *)
+let add_arm64_veneers obj p =
+  let sect = Section.create ".text$flexdll" 0x60500020l in
+  let data = Buffer.create 64 in
+  let veneers = Hashtbl.create 16 in
+  List.iter (fun sec ->
+    sec.relocs <- List.map (fun rel ->
+      if rel.rtype <> 0x03 || not (p rel.symbol) then rel
+      else begin
+        let code = match sec.data with `String s -> s | _ -> assert false in
+        let pos = Int32.to_int rel.addr in
+        let insn = int32 code pos in
+        let addend = Int32.to_int (Int32.shift_right (Int32.shift_left insn 6) 6) * 4 in
+        let sym = try Hashtbl.find veneers (rel.symbol.sym_name, addend)
+          with Not_found ->
+            let ofs = Buffer.length data in
+            let sym = Symbol.intern sect (Int32.of_int ofs) in
+            obj.symbols <- sym :: obj.symbols;
+            int32_to_buf data 0x58000050; (* ldr x16, .+8 *)
+            int32_to_buf data 0xd61f0200; (* br x16; preserve LR and arguments *)
+            Reloc.abs `arm64 sect (Int32.of_int (ofs + 8)) rel.symbol;
+            int32_to_buf data addend;
+            int32_to_buf data (if addend < 0 then -1 else 0);
+            Hashtbl.add veneers (rel.symbol.sym_name, addend) sym;
+            sym
+        in
+        (* Transfer the instruction's addend to the literal pointer. *)
+        let insn = Int32.logand insn 0xfc000000l in
+        for i = 0 to 3 do
+          Bytes.set code (pos + i)
+            (Char.chr (Int32.to_int (Int32.logand (Int32.shift_right_logical insn (8 * i)) 0xffl)))
+        done;
+        { rel with symbol = sym }
+      end) sec.relocs) obj.sections;
+  if Buffer.length data <> 0 then begin
+    sect.data <- `String (Buffer.to_bytes data);
+    obj.sections <- sect :: obj.sections
+  end
+
 let add_reloc_table obj obj_name p =
+  if !machine = `arm64 then add_arm64_veneers obj p;
   let sname = Symbol.gen_sym () in (* symbol pointing to the reloc table *)
   let sect = Section.create ".reltbl" 0xc0300040l in
   let data = Buffer.create 1024 in
@@ -447,15 +490,18 @@ let add_reloc_table obj obj_name p =
          - https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#x64-processors *)
       let kind = match !machine, rel.rtype with
         | `x86, 0x06 (* IMAGE_REL_I386_DIR32 *)
-        | `x64, 0x01 (* IMAGE_REL_AMD64_ADDR64 *) ->
+        | `x64, 0x01 (* IMAGE_REL_AMD64_ADDR64 *)
+        | `arm64, 0x0e (* IMAGE_REL_ARM64_ADDR64 *) ->
             0x0002 (* absolute, native size (32/64) *)
 
         | `x86, 0x07 (* IMAGE_REL_I386_DIR32NB *)
-        | `x64, 0x03 (* IMAGE_REL_AMD64_ADDR32NB *) ->
+        | `x64, 0x03 (* IMAGE_REL_AMD64_ADDR32NB *)
+        | `arm64, 0x02 (* IMAGE_REL_ARM64_ADDR32NB *) ->
             0x0007 (* 32nb *)
 
         | `x64, 0x04 (* IMAGE_REL_AMD64_REL32 *)
-        | `x86, 0x14 (* IMAGE_REL_I386_REL32 *) when not !no_rel_relocs ->
+        | `x86, 0x14 (* IMAGE_REL_I386_REL32 *)
+        | `arm64, 0x11 (* IMAGE_REL_ARM64_REL32 *) when not !no_rel_relocs ->
             0x0001 (* rel32 *)
 
         | `x64, 0x05 (* IMAGE_REL_AMD64_REL32_1 *) when not !no_rel_relocs->
@@ -470,7 +516,9 @@ let add_reloc_table obj obj_name p =
             0x0006 (* rel32_5 *)
 
         | (`x86 | `x64), (0x0a (* IMAGE_REL_{I386|AMD64}_SECTION *) |
-                          0x0b (* IMAGE_REL_{I386|AMD64}_SECREL*) ) ->
+                          0x0b (* IMAGE_REL_{I386|AMD64}_SECREL*) )
+        | `arm64, (0x0d (* IMAGE_REL_ARM64_SECTION *) |
+                   0x08 (* IMAGE_REL_ARM64_SECREL *)) ->
             0x0100 (* debug relocs: ignore *)
 
         | _, k ->
@@ -553,7 +601,7 @@ let add_reloc_table obj obj_name p =
 (* Create a table for import symbols __imp_XXX *)
 
 let add_import_table obj imports =
-  let ptr_size = match !machine with `x86 -> 4 | `x64 -> 8 in
+  let ptr_size = match !machine with `x86 -> 4 | `x64 | `arm64 -> 8 in
   let sect = Section.create ".imptbl" 0xc0300040l in
   obj.sections <- sect :: obj.sections;
   sect.data <- `String (Bytes.make (ptr_size * List.length imports) '\000');
@@ -663,6 +711,13 @@ let parse_dll_exports fn =
 
 
 let dll_exports fn = match !toolchain with
+  | `MINGWARM64 ->
+      List.fold_left (fun exports line ->
+        let line = String.trim line in
+        match check_prefix "Name: " line with
+        | Some name -> (name, 0) :: exports
+        | None -> exports) []
+        (get_output "llvm-readobj --coff-exports %s" (Filename.quote fn))
   | `MSVC | `MSVC64 | `LIGHTLD ->
       failwith "Creation of import library not supported for this toolchain"
   | `GNAT | `GNAT64 | `CYGWIN64 | `MINGW | `MINGW64 ->
@@ -866,7 +921,7 @@ let build_dll link_exe output_file files exts extra_args =
     if main_pgm then add_def (usym "static_symtable")
     else add_def (usym "reloctbl");
 
-    if !machine = `x64 then add_def "__ImageBase"
+    if !machine <> `x86 then add_def "__ImageBase"
     else add_def "___ImageBase";
 
     !defined, !from_imports, (Hashtbl.find aliases), (Hashtbl.find alternates)
@@ -982,6 +1037,10 @@ let build_dll link_exe output_file files exts extra_args =
 
   let dll_exports = ref StrSet.empty in
   let rec link_obj fn obj =
+    (* Reject non-ARM64 objects in ARM64 links. IMAGE_FILE_MACHINE_UNKNOWN (0)
+       objects are architecture-neutral and accepted. *)
+    if !machine = `arm64 && obj.machine <> 0 && obj.machine <> 0xaa64 then
+      failwith (Printf.sprintf "Incompatible COFF machine %04x in %s" obj.machine fn);
     List.iter
       (fun sym ->
          if Symbol.is_defin sym && exportable sym.sym_name
@@ -1178,7 +1237,7 @@ let build_dll link_exe output_file files exts extra_args =
           let s =
             match !machine with
             | `x86 -> "FlexDLLiniter@12"
-            | `x64 -> "FlexDLLiniter"
+            | `x64 | `arm64 -> "FlexDLLiniter"
           in
           Printf.sprintf "/entry:%s " s
           )
@@ -1210,7 +1269,7 @@ let build_dll link_exe output_file files exts extra_args =
           files
           def_file
           extra_args
-    | `MINGW | `MINGW64 | `GNAT | `GNAT64 ->
+    | `MINGW | `MINGW64 | `MINGWARM64 | `GNAT | `GNAT64 ->
         let def_file =
           if main_pgm then ""
           else
@@ -1263,6 +1322,7 @@ let build_dll link_exe output_file files exts extra_args =
             match !machine with
             | `x86 -> "default.manifest"
             | `x64 -> "default_amd64.manifest"
+            | `arm64 -> failwith "ARM64 requires -real-manifest"
           in
           Filename.concat flexdir default_manifest
       in
@@ -1363,8 +1423,8 @@ let remove_duplicate_paths paths =
   loop paths
 
 let setup_toolchain () =
-  let mingw_libs pre =
-    objdump := pre ^ "objdump";
+  let mingw_libs ?(clang=false) pre =
+    objdump := (if clang then "llvm-objdump" else pre ^ "objdump");
     let rec get_lib_search_dirs install libraries input =
       match input with
       | entry :: input ->
@@ -1422,11 +1482,18 @@ let setup_toolchain () =
         default_libs := "-lgcc_eh" :: !default_libs
       with Not_found -> ()
     in
-    default_libs := "-lmingw32" :: "-lgcc" :: !default_libs;
+    if clang then begin
+      default_libs := List.map (fun lib -> if lib = "-lmsvcrt" then "-lucrt" else lib) !default_libs;
+      default_libs := "-lmingw32" ::
+        get_output1 "%s -print-libgcc-file-name" (cc !toolchain) :: !default_libs
+    end else
+      default_libs := "-lmingw32" :: "-lgcc" :: !default_libs;
     if !exe_mode = `EXE then default_libs := "crt2.o" :: !default_libs
     else default_libs := "dllcrt2.o" :: !default_libs
   in
   match !toolchain with
+  | _ when !builtin_linker && !machine = `arm64 ->
+      failwith "ARM64 requires an external linker (Clang/LLD)"
   | _ when !builtin_linker ->
       search_path := !dirs;
       add_flexdll_obj := false;
@@ -1451,6 +1518,8 @@ let setup_toolchain () =
       mingw_libs Version.mingw_prefix
   | `MINGW64 ->
       mingw_libs Version.mingw64_prefix
+  | `MINGWARM64 ->
+      mingw_libs ~clang:true ""
   | `GNAT | `GNAT64 ->
    (* This is a plain copy of the mingw version, but we do not change the
       prefix and use "gnatls" to compute the include dir. *)
@@ -1509,7 +1578,7 @@ let compile_if_needed file =
             (Filename.quote tmp_obj)
             (mk_dirs_opt "-I")
             file
-      | `MINGW | `MINGW64 | `GNAT | `GNAT64 ->
+      | `MINGW | `MINGW64 | `MINGWARM64 | `GNAT | `GNAT64 ->
           Printf.sprintf
             "%s -c -o %s %s %s"
             (cc !toolchain)
@@ -1559,6 +1628,7 @@ let all_files () =
   | `MSVC64 -> "msvc64.obj"
   | `CYGWIN64 -> "cygwin64.o"
   | `MINGW64 -> "mingw64.o"
+  | `MINGWARM64 -> "mingwarm64.o"
   | `GNAT -> "gnat.o"
   | `GNAT64 -> "gnat64.o"
   | `MINGW | `LIGHTLD -> "mingw.o" in

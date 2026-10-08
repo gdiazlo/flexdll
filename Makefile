@@ -34,6 +34,8 @@ MINCC = $(MINGW_PREFIX)gcc
 MINGW64_PREFIX = x86_64-w64-mingw32-
 MIN64CC = $(MINGW64_PREFIX)gcc
 
+MINARM64CC = aarch64-w64-mingw32-clang
+
 CYGWIN64_PREFIX = x86_64-pc-cygwin-
 CYG64CC = $(CYGWIN64_PREFIX)gcc
 
@@ -46,6 +48,7 @@ version.ml: Makefile flexdll.opam
 	echo 'let cygwin64 = "$(notdir $(CYG64CC))"' >> $@
 	echo 'let mingw = "$(notdir $(MINCC))"' >> $@
 	echo 'let mingw64 = "$(notdir $(MIN64CC))"' >> $@
+	echo 'let mingwarm64 = "$(notdir $(MINARM64CC))"' >> $@
 	echo 'let gnat = "gcc"' >> $@
 
 # Supported tool-chains
@@ -154,6 +157,7 @@ build_msvc64: flexdll_msvc64.obj flexdll_initer_msvc64.obj
 build_cygwin64: flexdll_cygwin64.o flexdll_initer_cygwin64.o
 build_mingw: flexdll_mingw.o flexdll_initer_mingw.o
 build_mingw64: flexdll_mingw64.o flexdll_initer_mingw64.o
+build_mingwarm64: flexdll_mingwarm64.o flexdll_initer_mingwarm64.o
 
 OBJS = version.ml Compat.ml coff.ml cmdline.ml create_dll.ml reloc.ml
 
@@ -227,6 +231,12 @@ flexdll_gnat.o: flexdll.c flexdll.h
 flexdll_mingw64.o: flexdll.c flexdll.h
 	$(MIN64CC) $(GCC_FLAGS) -DMINGW -c -o $@ $<
 
+flexdll_mingwarm64.o: flexdll.c flexdll.h
+	$(MINARM64CC) $(GCC_FLAGS) -DMINGW -c -o $@ $<
+
+flexdll_initer_mingwarm64.o: flexdll_initer.c
+	$(MINARM64CC) $(GCC_FLAGS) -c -o $@ $<
+
 flexdll_initer_msvc.obj: flexdll_initer.c
 	$(MSVC_PREFIX) $(MSVCC) $(MSVC_FLAGS) -c /Fo"$@" $<
 
@@ -259,6 +269,9 @@ demo_mingw: flexlink.exe flexdll_mingw.o flexdll_initer_mingw.o
 
 demo_mingw64: flexlink.exe flexdll_mingw64.o flexdll_initer_mingw64.o
 	$(MAKE) -C test clean demo CHAIN=mingw64 CC="$(MIN64CC)" CFLAGS="$(GCC_FLAGS)" O=o
+
+demo_mingwarm64: flexlink.exe flexdll_mingwarm64.o flexdll_initer_mingwarm64.o
+	$(MAKE) -C test clean demo CHAIN=mingwarm64 CC="$(MINARM64CC)" CFLAGS="$(GCC_FLAGS)" O=o
 
 demo_msvc64:  flexlink.exe flexdll_msvc64.obj flexdll_initer_msvc64.obj
 	$(MSVC64_PREFIX) $(MAKE) -C test clean demo CHAIN=msvc64 CC="$(MSVCC64)" CFLAGS="$(MSVC_FLAGS)" PLUG2_CFLAGS="/bigobj" O=obj

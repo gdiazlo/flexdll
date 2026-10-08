@@ -310,6 +310,10 @@ static void relocate(resolver f, void *data, reloctbl *tbl, err_t *err) {
           fprintf(stderr, "natdynlink: VirtualProtect failed (%s), page_start = 0x%p\n", ll_dlerror(), page_start);
           exit(2);
         }
+#if defined(__aarch64__)
+        FlushInstructionCache(GetCurrentProcess(), prev_page_start,
+                              prev_page_end-prev_page_start+page_size);
+#endif
       }
 
       prev_page_start = page_start;
@@ -406,6 +410,10 @@ static void relocate(resolver f, void *data, reloctbl *tbl, err_t *err) {
       fprintf(stderr, "natdynlink: VirtualProtect failed (%s), page_start = 0x%p\n", ll_dlerror(), page_start);
       exit(2);
     }
+#if defined(__aarch64__)
+    FlushInstructionCache(GetCurrentProcess(), prev_page_start,
+                          prev_page_end-prev_page_start+page_size);
+#endif
   }
 }
 

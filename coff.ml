@@ -440,6 +440,7 @@ module Reloc = struct
       match machine with
       | `x86 -> 0x06
       | `x64 -> 0x01
+      | `arm64 -> 0x0e
     in
     sec.relocs <- { addr = addr; symbol = sym; rtype = rtype } :: sec.relocs
 
@@ -448,6 +449,7 @@ module Reloc = struct
       match machine with
       | `x86 -> 0x14
       | `x64 -> 0x04
+      | `arm64 -> 0x11
     in
     sec.relocs <- { addr = addr; symbol = sym; rtype = rtype } :: sec.relocs
 
@@ -673,6 +675,7 @@ module Coff = struct
     let machine =
       match machine with
       | `x64 -> 0x8664
+      | `arm64 -> 0xaa64
       | `x86 -> 0x14c
     in
     { bigobj = false;
@@ -832,6 +835,12 @@ module Coff = struct
     flush stdout
 
   let put oc x =
+    (* LLD chooses the first base-relocation page before sorting its entries.
+       Descending COFF relocations can therefore yield an invalid ARM64 image. *)
+    if x.machine = 0xaa64 then
+      List.iter (fun s ->
+        s.relocs <- List.sort (fun a b -> Int32.compare a.addr b.addr) s.relocs)
+        x.sections;
     let () =
       let no = ref 0 in
       List.iter

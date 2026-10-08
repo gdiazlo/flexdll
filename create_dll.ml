@@ -346,7 +346,9 @@ let create_dll oc objs =
   (* coff header *)
   let machine = !Cmdline.machine in
   let disp_mach ~x86 ~x64 =
-    match machine with `x86 -> x86 | `x64 -> x64
+    match machine with
+    | `x86 -> x86 | `x64 -> x64
+    | `arm64 -> failwith "ARM64 requires an external linker (Clang/LLD)"
   in
   let emit_int32_64 x =
     emit_int32 oc x;

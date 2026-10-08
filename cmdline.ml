@@ -11,7 +11,7 @@ open Compat
 let underscore = ref true
     (* Are "normal" symbols prefixed with an underscore? *)
 
-let machine : [ `x86 | `x64 ] ref = ref `x86
+let machine : [ `x86 | `x64 | `arm64 ] ref = ref `x86
 
 let noexport = ref false
 let custom_crt = ref false
@@ -20,7 +20,7 @@ let use_default_libs = ref true
 let subsystem = ref "console"
 let explain = ref false
 let builtin_linker = ref false
-let toolchain : [ `MSVC | `MSVC64 | `MINGW | `MINGW64 | `GNAT | `GNAT64 | `CYGWIN64 | `LIGHTLD ] ref = ref `MSVC
+let toolchain : [ `MSVC | `MSVC64 | `MINGW | `MINGW64 | `MINGWARM64 | `GNAT | `GNAT64 | `CYGWIN64 | `LIGHTLD ] ref = ref `MSVC
 let use_linker = ref None
 let use_mt = ref None
 let save_temps = ref false
@@ -103,7 +103,7 @@ let specs = [
   "-l", Arg.String (fun s -> files := ("-l" ^ s) :: !files),
   "<lib> Library file";
 
-  "-chain", Arg.Symbol (["msvc";"msvc64";"cygwin64";"mingw";"mingw64";"gnat";"gnat64";"ld"],
+  "-chain", Arg.Symbol (["msvc";"msvc64";"cygwin64";"mingw";"mingw64";"mingwarm64";"gnat";"gnat64";"ld"],
 			(fun s ->
                           machine := `x86; underscore := true;
                           toolchain := match s with
@@ -114,6 +114,7 @@ let specs = [
 			  | "gnat" -> `GNAT
 			  | "gnat64" -> machine := `x64; underscore := false; `GNAT64
 			  | "mingw64" -> machine := `x64; underscore := false; `MINGW64
+                          | "mingwarm64" -> machine := `arm64; underscore := false; `MINGWARM64
                           | "ld" -> `LIGHTLD
 			  | _ -> assert false)),
   " Choose which linker to use";

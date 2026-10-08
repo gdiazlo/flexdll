@@ -71,6 +71,15 @@ Cygwin (as i686-w64-mingw32-gcc).
 MINGW64: the 64-bit gcc compiler from the MinGW-w64 project, packaged in
 Cygwin (as x86\_64-w64-mingw32-gcc).
 
+MINGWARM64: the native ARM64 Clang/MinGW-w64/UCRT toolchain, such as MSYS2
+CLANGARM64. Build with `make MSVC_DETECT=0 CHAINS=mingwarm64 RC=windres`
+and link with `flexlink -chain mingwarm64`. `MINARM64CC` selects the compiler.
+The import-slot/veneer implementation supports full-width imported addresses
+and direct calls without requiring the host and DLL to be close under ASLR.
+Uncommon deferred instruction relocations are rejected. The built-in PE linker,
+Intel CRT default manifests, ARM32, and ARM64EC are not supported by this chain.
+`make demo_mingwarm64 MSVC_DETECT=0 RC=windres` runs the existing demo.
+
 LD: an internal linker to produce .dll (only).
 
 ## Download
@@ -539,7 +548,7 @@ Usage:
   -I <dir>            Add a directory where to search for files
   -L <dir>            Add a directory where to search for files
   -l <lib>            Library file
-  -chain {msvc|msvc64|cygwin64|mingw|mingw64|gnat|gnat64|ld}
+  -chain {msvc|msvc64|cygwin64|mingw|mingw64|mingwarm64|gnat|gnat64|ld}
                       Choose which linker to use
   -use-linker <cmd>   Choose an alternative linker to use
   -use-mt <cmd>       Choose an alternative manifest tool to use
